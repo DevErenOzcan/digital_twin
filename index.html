@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Gelişmiş Enerji Digital Twin</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #000; }
+
+        /* --- UI Paneli --- */
+        #ui-container {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 320px;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        #info-card {
+            background: rgba(20, 25, 40, 0.95);
+            backdrop-filter: blur(10px);
+            color: white;
+            padding: 20px;
+            border-radius: 15px;
+            border-left: 5px solid #4CAF50;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
+            transform: translateX(-120%);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            pointer-events: auto;
+            max-height: 80vh; /* Çok uzarsa scroll olsun */
+            overflow-y: auto;
+        }
+
+        #info-card.visible { transform: translateX(0); }
+
+        h2 { margin: 0 0 15px 0; font-size: 22px; color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 10px;}
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px; color: #ccc; }
+        .stat-val { font-weight: bold; color: #fff; }
+
+        /* --- Cihaz Listesi Tablosu --- */
+        .appliance-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            font-size: 13px;
+        }
+        .appliance-table th { text-align: left; color: #888; padding-bottom: 5px; border-bottom: 1px solid #555; }
+        .appliance-table td { padding: 8px 0; border-bottom: 1px solid #333; }
+
+        .tag { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; text-transform: uppercase;}
+        .tag.bad { background: rgba(255, 87, 87, 0.2); color: #ff5757; border: 1px solid #ff5757; }
+        .tag.good { background: rgba(76, 175, 80, 0.2); color: #4caf50; border: 1px solid #4caf50; }
+        .tag.neutral { background: rgba(255, 255, 255, 0.1); color: #ccc; border: 1px solid #666; }
+
+        /* --- Kontrol Paneli --- */
+        #controls {
+            position: absolute;
+            top: 20px; right: 20px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px; border-radius: 10px; width: 200px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            z-index: 10;
+        }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; font-size: 24px; font-weight: bold; text-shadow: 0 0 10px black;
+        }
+
+        /* Scrollbar şıklığı */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #222; }
+        ::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+    <div id="loading">Mahalle ve Veriler Yükleniyor...</div>
+
+    <div id="ui-container">
+        <div id="info-card">
+            <h2 id="user-name">Kullanıcı</h2>
+            <div class="stat-row"><span>📍 Adres:</span> <span id="user-address" class="stat-val">-</span></div>
+            <div class="stat-row"><span>⚡ Toplam Tüketim:</span> <span id="user-consumption" class="stat-val">-</span> kWh</div>
+            <div class="stat-row"><span>🏆 Verimlilik Skoru:</span> <span id="user-score" class="stat-val">-</span></div>
+
+            <div id="appliance-container">
+                <table class="appliance-table">
+                    <thead>
+                        <tr>
+                            <th>Cihaz</th>
+                            <th>Tüketim</th>
+                            <th>Durum</th>
+                        </tr>
+                    </thead>
+                    <tbody id="appliance-list">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="controls">
+        <label>🕒 Saat: <span id="time-display">12:00</span></label>
+        <input type="range" id="time-slider" min="0" max="24" step="0.1" value="12" style="width:100%">
+        <p style="font-size: 11px; color: #666; margin-top:5px;">Gece: Pencereler yanar.</p>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // SAHNE KURULUMU (Değişmedi)
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 20, 80);
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 15, 30);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.maxPolarAngle = Math.PI / 2 - 0.1;
+
+        // IŞIKLAR
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        scene.add(ambientLight);
+        const sunLight = new THREE.DirectionalLight(0xffddee, 1);
+        sunLight.position.set(50, 50, 50);
+        sunLight.castShadow = true;
+        sunLight.shadow.mapSize.width = 2048;
+        scene.add(sunLight);
+
+        // ÇEVRE
+        const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: 0x4f7942 }));
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        const road = new THREE.Mesh(new THREE.PlaneGeometry(200, 8), new THREE.MeshStandardMaterial({ color: 0x333333 }));
+        road.rotation.x = -Math.PI / 2;
+        road.position.y = 0.02;
+        scene.add(road);
+
+        // AĞAÇLAR
+        function createTree(x, z) {
+            const treeGroup = new THREE.Group();
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.7, 3, 6), new THREE.MeshStandardMaterial({ color: 0x8B4513 }));
+            trunk.position.y = 1.5; trunk.castShadow = true;
+            treeGroup.add(trunk);
+            const leaves = new THREE.Mesh(new THREE.ConeGeometry(2.5, 6, 8), new THREE.MeshStandardMaterial({ color: 0x228B22 }));
+            leaves.position.y = 4.5; leaves.castShadow = true;
+            treeGroup.add(leaves);
+            treeGroup.position.set(x, 0, z);
+            scene.add(treeGroup);
+        }
+        for(let i=0; i<40; i++) {
+            let z = (Math.random() - 0.5) * 60;
+            if (z > -8 && z < 8) continue;
+            createTree((Math.random() - 0.5) * 150, z - 10);
+        }
+
+        // EVLER
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const houseMeshes = [];
+        const windowMaterials = [];
+
+        function createDetailedHouse(data, x, z) {
+            const houseGroup = new THREE.Group();
+            // ID bilgisini userData içine kaydediyoruz ki tıklayınca API'ye sorabilelim
+            houseGroup.userData = data;
+
+            const scoreColor = new THREE.Color().setHSL((data.score / 100) * 0.3, 0.8, 0.4);
+
+            // Bina
+            const body = new THREE.Mesh(new THREE.BoxGeometry(5, 4, 5), new THREE.MeshStandardMaterial({ color: 0xe0e0e0 }));
+            body.position.y = 2; body.castShadow = true; body.receiveShadow = true;
+            houseGroup.add(body);
+
+            // Çatı
+            const roof = new THREE.Mesh(new THREE.ConeGeometry(4.5, 2.5, 4), new THREE.MeshStandardMaterial({ color: scoreColor }));
+            roof.position.y = 5.25; roof.rotation.y = Math.PI / 4; roof.castShadow = true;
+            houseGroup.add(roof);
+
+            // Kapı
+            const door = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2, 0.2), new THREE.MeshStandardMaterial({ color: 0x5D4037 }));
+            door.position.set(0, 1, 2.55);
+            houseGroup.add(door);
+
+            // Pencereler
+            const winMat = new THREE.MeshStandardMaterial({ color: 0x333333, emissive: 0x000000 });
+            windowMaterials.push(winMat);
+            const win1 = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), winMat); win1.position.set(1.5, 2.5, 2.55); houseGroup.add(win1);
+            const win2 = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), winMat); win2.rotation.y = -Math.PI/2; win2.position.set(-2.55, 2.5, 0); houseGroup.add(win2);
+
+            houseGroup.position.set(x, 0, z);
+            scene.add(houseGroup);
+            houseMeshes.push(body, roof, door);
+        }
+
+        // --- VERİ YÜKLEME ---
+        let usersData = [];
+
+        fetch('http://127.0.0.1:5000/api/digital-twin')
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('loading').style.display = 'none';
+                usersData = data; // Veriyi globalde tut
+                let xOffset = -30;
+
+                // API'den gelen "id" alanı doğrudan veritabanındaki user_id'dir
+                data.forEach((user, i) => {
+                    user.db_id = user.id; // API'den gelen gerçek user ID'sini kullan
+                    createDetailedHouse(user, xOffset, 6);
+                    xOffset += 15;
+                });
+            });
+
+        // --- ETKİLEŞİM ---
+        window.addEventListener('mousemove', (e) => {
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+        });
+
+        window.addEventListener('click', () => {
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(houseMeshes);
+            const card = document.getElementById('info-card');
+
+            if (intersects.length > 0) {
+                const group = intersects[0].object.parent;
+                const data = group.userData;
+
+                // Temel Bilgileri Göster
+                document.getElementById('user-name').innerText = data.isim + " " + data.soyisim;
+                document.getElementById('user-address').innerText = data.adres;
+                document.getElementById('user-consumption').innerText = data.tuketim.toFixed(2);
+                document.getElementById('user-score').innerText = data.score;
+                card.style.borderLeftColor = new THREE.Color().setHSL((data.score / 100) * 0.3, 0.8, 0.4).getStyle();
+
+                // DETAYLARI ÇEK (Yeni API Çağrısı)
+                // Listeyi temizle ve "Yükleniyor" yaz
+                const listBody = document.getElementById('appliance-list');
+                listBody.innerHTML = '<tr><td colspan="3">Analiz ediliyor...</td></tr>';
+                card.classList.add('visible');
+
+                fetch(`http://127.0.0.1:5000/api/details/${data.db_id}`)
+                    .then(res => res.json())
+                    .then(details => {
+                        listBody.innerHTML = ''; // Temizle
+
+                        details.forEach(item => {
+                            let tagClass = 'neutral';
+                            if (item.durum === 'Olması gerekenden Fazla') tagClass = 'bad';
+                            if (item.durum === 'Verimli') tagClass = 'good';
+
+                            const row = `
+                                <tr>
+                                    <td>
+                                        <div style="font-weight:bold">${item.tur}</div>
+                                        <div style="font-size:11px; color:#888">${item.marka}</div>
+                                    </td>
+                                    <td>${item.tuketim_kwh} kWh</td>
+                                    <td><span class="tag ${tagClass}">${item.durum}</span></td>
+                                </tr>
+                            `;
+                            listBody.innerHTML += row;
+                        });
+                    })
+                    .catch(err => {
+                        listBody.innerHTML = '<tr><td colspan="3" style="color:red">Hata oluştu.</td></tr>';
+                        console.error(err);
+                    });
+
+            } else {
+                card.classList.remove('visible');
+            }
+        });
+
+        // --- ZAMAN DÖNGÜSÜ ---
+        const slider = document.getElementById('time-slider');
+        slider.addEventListener('input', updateTime);
+
+        function updateTime() {
+            const h = parseFloat(slider.value);
+            const hours = Math.floor(h);
+            const mins = Math.floor((h - hours) * 60);
+            document.getElementById('time-display').innerText = `${hours.toString().padStart(2,'0')}:${mins.toString().padStart(2,'0')}`;
+
+            let intensity = Math.sin(((h - 6) / 12) * Math.PI);
+            if (h < 6 || h > 18) intensity = 0;
+
+            sunLight.intensity = intensity;
+            ambientLight.intensity = 0.1 + (intensity * 0.5);
+
+            const nightColor = new THREE.Color(0x1a1a2e);
+            const dayColor = new THREE.Color(0x87CEEB);
+            scene.background.lerpColors(nightColor, dayColor, intensity);
+            scene.fog.color.copy(scene.background);
+
+            const isNight = intensity < 0.2;
+            windowMaterials.forEach(m => {
+                if (isNight) {
+                    m.color.setHex(0xffff00); m.emissive.setHex(0xffaa00); m.emissiveIntensity = 1;
+                } else {
+                    m.color.setHex(0x333333); m.emissive.setHex(0x000000);
+                }
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        updateTime();
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
