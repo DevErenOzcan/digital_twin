@@ -7,7 +7,6 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# API KEY'iniz varsa buraya yazın. Yoksa kod mock data üretecektir.
 OPENWEATHER_API_KEY = "caf76a2f270d3cd2405280edd5c9306f"
 CITY = "Manisa"
 
@@ -19,46 +18,52 @@ def get_db_connection():
 
 
 def get_live_weather():
-    """Hava durumunu çeker. Hata alırsa rastgele veri döner."""
     try:
         url = f"http://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={OPENWEATHER_API_KEY}&units=metric"
         response = requests.get(url, timeout=2)
         if response.status_code == 200:
             data = response.json()
-            return {
-                "temp": data['main']['temp'],
-                "desc": data['weather'][0]['description'],
-                "is_live": True
-            }
+            return {"temp": data['main']['temp'], "desc": data['weather'][0]['description'], "is_live": True}
     except:
         pass
-
-    # API yoksa veya hata verdiyse simülasyon yap
-    return {
-        "temp": random.uniform(5, 30),  # 5 ile 30 derece arası salla
-        "desc": "Simülasyon (Parçalı Bulutlu)",
-        "is_live": False
-    }
+    return {"temp": random.uniform(18, 24), "desc": "Simülasyon", "is_live": False}
 
 
 @app.route('/api/digital-twin', methods=['GET'])
 def get_digital_twin_data():
     conn = get_db_connection()
     cursor = conn.cursor()
-    query = "SELECT u.id, u.isim, u.soyisim, u.score, e.adres, e.toplam_tuketim_kwh FROM Users u JOIN Evler e ON u.id = e.user_id"
+
+    # Kullanıcı ve Ev bilgilerini çek
+    query = "SELECT u.id, u.isim, u.soyisim, u.score, e.adres, e.id as ev_id FROM Users u JOIN Evler e ON u.id = e.user_id"
     rows = cursor.execute(query).fetchall()
-    conn.close()
 
     data = []
     for row in rows:
+        ev_id = row['ev_id']
+
+        # --- CANLI TÜKETİM HESABI ---
+        # Aletler tablosu ile CihazDurumlari tablosunu birleştirip topluyoruz
+        live_query = """
+                     SELECT SUM(d.anlik_tuketim) as toplam_watt
+                     FROM Aletler a
+                              JOIN CihazDurumlari d ON a.id = d.alet_id
+                     WHERE a.ev_id = ? \
+                       AND d.calisiyor_mu = 1 \
+                     """
+        res = cursor.execute(live_query, (ev_id,)).fetchone()
+
+        anlik_watt = res['toplam_watt'] if res['toplam_watt'] else 0
+
         data.append({
             "id": row["id"],
             "isim": row["isim"],
             "soyisim": row["soyisim"],
             "score": row["score"],
             "adres": row["adres"],
-            "tuketim": row["toplam_tuketim_kwh"]
+            "anlik_tuketim_watt": round(anlik_watt, 1)  # KWh değil, Watt cinsinden anlık güç
         })
+    conn.close()
     return jsonify(data)
 
 
@@ -67,16 +72,28 @@ def get_house_details(user_id):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 1. Aletleri Çek
-    query_aletler = "SELECT a.id, a.tur, a.marka, a.watt FROM Aletler a JOIN Evler e ON a.ev_id = e.id WHERE e.user_id = ?"
+    # --- 1. ALETLERİ VE CANLI DURUMLARINI ÇEK ---
+    # LEFT JOIN kullanıyoruz: Eğer simülasyon henüz o alet için veri üretmediyse NULL gelmesin diye COALESCE kullanıyoruz.
+    query_aletler = """
+                    SELECT a.id, \
+                           a.tur, \
+                           a.marka, \
+                           a.watt                       as nominal_watt, \
+                           COALESCE(d.calisiyor_mu, 0)  as calisiyor_mu, \
+                           COALESCE(d.anlik_tuketim, 0) as anlik_tuketim
+                    FROM Aletler a
+                             JOIN Evler e ON a.ev_id = e.id
+                             LEFT JOIN CihazDurumlari d ON a.id = d.alet_id
+                    WHERE e.user_id = ? \
+                    """
     aletler = cursor.execute(query_aletler, (user_id,)).fetchall()
 
-    # 2. Evin Termostat Hedef Sıcaklığını Çek
+    # 2. Evin Hedef Sıcaklığı
     query_ev = "SELECT hedef_sicaklik FROM Evler WHERE user_id = ?"
     ev_data = cursor.execute(query_ev, (user_id,)).fetchone()
     hedef_sicaklik = ev_data['hedef_sicaklik'] if ev_data else 22
 
-    # 3. Hava Durumunu Al
+    # 3. Hava Durumu
     weather = get_live_weather()
     dis_sicaklik = weather['temp']
 
@@ -87,55 +104,29 @@ def get_house_details(user_id):
     elif dis_sicaklik > (hedef_sicaklik + 1):
         termostat_durumu = "Soğutuyor ❄️"
 
-    termostat_info = {
+    detaylar = []
+    detaylar.append({
         "tur": "Termostat",
         "marka": "IoT Smart",
         "hedef": hedef_sicaklik,
         "dis_hava": round(dis_sicaklik, 1),
         "durum": termostat_durumu,
-        "is_live": weather['is_live'],
-        "desc": weather['desc']
-    }
-
-    detaylar = []
-    # Termostatı listenin başına ekle
-    detaylar.append(termostat_info)
+        "calisiyor_mu": True,
+        "anlik_tuketim": 0
+    })
 
     for alet in aletler:
-        query_log = "SELECT baslangic_saati, tuketim_wh FROM TuketimLoglari WHERE alet_id = ?"
-        logs = cursor.execute(query_log, (alet['id'],)).fetchall()
-
-        toplam_tuketim = 0
-        puant_kullanim = 0;
-        gece_kullanim = 0;
-        toplam_calisma = 0
-
-        for log in logs:
-            tuketim = log['tuketim_wh']
-            try:
-                baslangic = int(str(log['baslangic_saati']).split('.')[0])
-            except:
-                baslangic = 12
-            toplam_tuketim += tuketim
-            toplam_calisma += 1
-            if 17 <= baslangic < 22:
-                puant_kullanim += 1
-            elif baslangic >= 22 or baslangic < 6:
-                gece_kullanim += 1
-
-        durum = "Normal"
-        if toplam_calisma > 0:
-            if (puant_kullanim / toplam_calisma) > 0.4:
-                durum = "Savurgan"
-            elif (gece_kullanim / toplam_calisma) > 0.4:
-                durum = "Verimli"
-        if alet['tur'] == "Buzdolabı": durum = "Sabit Yük"
+        durum_metni = "KAPALI"
+        if alet['calisiyor_mu']:
+            durum_metni = "ÇALIŞIYOR"
 
         detaylar.append({
             "tur": alet['tur'],
             "marka": alet['marka'],
-            "tuketim_kwh": round(toplam_tuketim / 1000, 2),
-            "durum": durum
+            "nominal_watt": alet['nominal_watt'],
+            "anlik_tuketim": round(alet['anlik_tuketim'], 1),
+            "calisiyor_mu": bool(alet['calisiyor_mu']),
+            "durum": durum_metni
         })
 
     conn.close()
@@ -143,5 +134,5 @@ def get_house_details(user_id):
 
 
 if __name__ == '__main__':
-    print("🌍 Digital Twin API + Weather Çalışıyor: http://127.0.0.1:5000")
-    app.run(debug=True, port=5000)
+    print("🌍 Live Digital Twin API (Non-Destructive Mode) Çalışıyor: http://127.0.0.1:5000")
+    app.run(host='0.0.0.0', debug=True, port=5000)
